@@ -1,15 +1,12 @@
-import sys
+import os
 import selectors
-import json
-import io
-import struct
 import datetime
-from collections import OrderedDict
+import mimetypes
+import re
 
 
 class Message:
-
-    def __init__(self, selector, sock, addr):
+    def __init__(self, selector, sock, addr, rootdir):
         self.selector = selector
         self.sock = sock
         self.addr = addr
@@ -19,16 +16,8 @@ class Message:
         self.uri = None
         self.request = None
         self.response_created = False
-        self.responsecode = {"200": "OK",
-                             "500": "Internal sever Error",
-                             "405": "405_description",
-                             "403": "403_description",
-                             "404": "404_description",
-                             }
-        self.version = "HTTP/1.1"
-        self.supported_methods = ["GET", "HEAD"]
-        #Date, Server, Content‐Length, Content‐Type, Connection
-        self.headers = dict(Server='OTUServer')
+
+        self.request_processor = HTTPRequestProcessor(rootdir)
 
     def _set_selector_events_mask(self, mode):
         """Set selector to listen for events: mode is 'r', 'w', or 'rw'."""
@@ -115,47 +104,125 @@ class Message:
         self.response_created = True
         self._send_buffer += message
 
-    def _create_dummy_response(self, uri="abracadabra"):
-        send_mesg = self.format_response_head("200")
-        print("Sended message %s" % send_mesg)
-        response = send_mesg.encode("utf-8") + uri.encode("utf-8")
-        return response
-
     def _create_response(self, request):
+        return self.request_processor.create_response_for_message(request)
+
+
+class HTTPRequestProcessor:
+
+    def __init__(self, rootdir):
+        self.responsecode = {"200": "OK",
+                             "500": "Internal sever Error",
+                             "405": "Method Unsupported",
+                             "403": "Access Denied",
+                             "404": "Resource Not Fund",
+                             }
+        self.rootdir = rootdir
+        # Date, Server, Content‐Length, Content‐Type, Connection
+        self.headers = dict(Server='OTUServer')
+        self.version = "HTTP/1.1"
+        self.supported_methods = ["GET", "HEAD"]
+        self.uri_pattern = re.compile(r"^\/[\/\.a-zA-Z0-9\-\_\%]*$")
+
+    def create_response_for_message(self, request):
         try:
             processed_str = request.decode("utf-8")
         except UnicodeDecodeError:
-            send_mesg = self.format_response_head("500")
-            print("Sended message %s" % send_mesg)
-            response = send_mesg.encode("utf-8")
-            return response
+            return self.create_response_not_200("500")
         method, uri, *_ = processed_str.split(" ")
         if method not in self.supported_methods:
-            send_mesg = self.format_response_head("405")
-            print("Sended message %s" % send_mesg)
-            response = send_mesg.encode("utf-8") + method.upper().encode("utf-8")
-            return response
+            return self.create_response_not_200("405")
         if method.upper() == "GET":
-            response = self._create_dummy_response(uri=uri)
+            response = self.validate_uri(method, uri)
         else:
-            response = self._create_dummy_response(uri=uri)
+            response = self.validate_uri(method, uri)
         return response
 
-    def create_headers(self, responsecode):
-        self.headers['Date'] = self.create_timestamp()
+    def create_response_not_200(self, responsecode):
+        self._flush_headers()
+        send_mesg = self._format_response_head(responsecode)
+        print("Sended message %s" % send_mesg)
+        body = None
+        with open(f"error_templates/{responsecode}.html", 'rb') as error_file:
+            body = error_file.read()
+        self.headers['Content-Length'] = self.get_file_size(f"error_templates/{responsecode}.html")
+        self.headers['Content‐Type'] = mimetypes.guess_type(f"error_templates/{responsecode}.html")[0]
+        self.headers['Connection'] = "close"
+        response = send_mesg.encode("utf-8") + body
+        return response
+
+    def create_response_200(self, method, uri="error_templates/404.html"):
+        self._flush_headers()
+        body = b""
+        self.headers['Content-Length'] = self.get_file_size(uri)
+        self.headers['Content‐Type'] = mimetypes.guess_type(uri)[0]
+        self.headers['Connection'] = "close"
+        if method == "GET":
+            with open(uri, "rb") as error_file:
+                body = error_file.read()
+        send_mesg = self._format_response_head("200")
+        response = send_mesg.encode("utf-8") + body
+        return response
+
+    def validate_uri(self, method, uri):
+        try:
+            if "../" in uri:
+                return self.create_response_not_200("403")
+            # Split ? and #
+            uri = uri.split("#")[0].split("?")[0]
+            if not self.uri_pattern.match(uri):
+                return self.create_response_not_200("403")
+            # understand spaces и %XX in filename
+            uri = self.unquote_uri(uri)
+            uri = os.path.join(self.rootdir, uri.lstrip('/'))
+            if os.path.isdir(uri):
+                uri = os.path.join(uri, 'index.html')
+            if not os.path.isfile(uri):
+                return self.create_response_not_200("404")
+            # print(uri)
+            response = self.create_response_200(method=method, uri=uri)
+            return response
+        except Exception as e:
+            print(repr(e))
+            return self.create_response_not_200("500")
+
+    def _format_response_head(self, responsecode):
+        response_string = self.responsecode[responsecode]
+        version = self.version
+        response_code_header_str = f'{" ".join([version, responsecode, response_string])}\r\n'
+        headers = self._create_headers()
+        if headers:
+            response_code_header_str = f'{response_code_header_str}{headers}\r\n\r\n'
+        return response_code_header_str
+
+    def _create_headers(self):
+        self.headers['Date'] = self._create_timestamp()
         temp_headers = [f'{key}: {value}' for key, value in self.headers.items()]
         headers = "\r\n".join(temp_headers)
         return headers
 
-    def format_response_head(self, responsecode):
-        response_string = self.responsecode[responsecode]
-        version = self.version
-        response_code = f'{" ".join([version, responsecode, response_string])}\r\n'
-        headers = self.create_headers(responsecode)
-        if headers:
-            response_code = f'{response_code}{headers}\r\n\r\n'
-        return response_code
+    @staticmethod
+    def _create_timestamp():
+        return datetime.datetime.strftime(datetime.datetime.now(), "%d %b %Y %H:%M")
+
+    def _flush_headers(self):
+        self.headers = dict(Server='OTUServer')
 
     @staticmethod
-    def create_timestamp():
-        return datetime.datetime.strftime(datetime.datetime.now(), "%d %b %Y %H:%M")
+    def get_file_size(uri):
+        return os.path.getsize(uri)
+
+    @staticmethod
+    def unquote_uri(uri):
+        # from urllib.parse lightly changed
+        _hexdig = '0123456789ABCDEFabcdef'
+        _hextobyte = None
+        if _hextobyte is None:
+            _hextobyte = {
+                ("%" + a + b).encode(): bytes([int(a + b, 16)])
+                for a in _hexdig for b in _hexdig
+            }
+        uri_encoded = uri.encode()
+        for match, sub in _hextobyte.items():
+            uri_encoded = uri_encoded.replace(match, sub)
+        return uri_encoded.decode(errors="replace")

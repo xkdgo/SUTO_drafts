@@ -1,6 +1,7 @@
 import http.client
-c = http.client.HTTPConnection("127.0.0.1", 9000)
-c.putrequest("GET", "/index.html")
+c = http.client.HTTPConnection("127.0.0.1", 8080)
+c.putrequest("GET", "/")
+# c.putrequest("HEAD", "/index.html")
 c.putheader("Someheader", "Somevalue")
 c.endheaders()
 r = c.getresponse()
