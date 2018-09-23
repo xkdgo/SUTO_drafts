@@ -11,7 +11,7 @@ import argparse
 
 class MultiprocessSocketServer:
 
-    def __init__(self, host="", port=8080, workers=1, rootdir=os.path.abspath("./doc_root")):
+    def __init__(self, host="", port=80, workers=1, rootdir=os.path.abspath("./doc_root")):
         self.host = host
         self.port = port
         self.sel = selectors.DefaultSelector()
@@ -64,8 +64,8 @@ def parse_args():
         help='listened host, default - localhost'
     )
     parser.add_argument(
-        '-p', '--port', type=int, default=8080,
-        help='listened port, default - 8099'
+        '-p', '--port', type=int, default=80,
+        help='listened port, default - 80'
     )
     parser.add_argument(
         '-w', '--workers', type=int, default=5,

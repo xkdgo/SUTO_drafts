@@ -151,10 +151,10 @@ class HTTPRequestProcessor:
         return response
 
     def create_response_200(self, method, uri="error_templates/404.html"):
-        self._flush_headers()
+        # self._flush_headers()
         body = b""
         self.headers['Content-Length'] = self.get_file_size(uri)
-        self.headers['Content‐Type'] = mimetypes.guess_type(uri)[0]
+        self.headers["Content-Type"] = mimetypes.guess_type(uri)[0]
         self.headers['Connection'] = "close"
         if method == "GET":
             with open(uri, "rb") as error_file:
