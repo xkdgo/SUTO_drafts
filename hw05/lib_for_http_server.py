@@ -142,7 +142,6 @@ class HTTPRequestProcessor:
         self._flush_headers()
         send_mesg = self._format_response_head(responsecode)
         print("Sended message %s" % send_mesg)
-        body = None
         with open(f"error_templates/{responsecode}.html", 'rb') as error_file:
             body = error_file.read()
         self.headers['Content-Length'] = self.get_file_size(f"error_templates/{responsecode}.html")
