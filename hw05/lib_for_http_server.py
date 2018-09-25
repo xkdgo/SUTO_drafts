@@ -16,8 +16,8 @@ class Message:
         self.uri = None
         self.request = None
         self.response_created = False
-
         self.request_processor = HTTPRequestProcessor(rootdir)
+
 
     def _set_selector_events_mask(self, mode):
         """Set selector to listen for events: mode is 'r', 'w', or 'rw'."""
@@ -46,7 +46,7 @@ class Message:
 
     def _write(self):
         if self._send_buffer:
-            print('sending', repr(self._send_buffer), 'to', self.addr)
+            # print('sending', repr(self._send_buffer), 'to', self.addr)
             try:
                 # Should be ready to write
                 sent = self.sock.send(self._send_buffer)
@@ -77,30 +77,31 @@ class Message:
         self._write()
 
     def close(self):
-        print('closing connection to', self.addr)
+        # print('closing connection to', self.addr)
         try:
             self.selector.unregister(self.sock)
         except Exception as e:
-            print(f'error: selector.unregister() exception for',
-                  f'{self.addr}: {repr(e)}')
+            # print(f'error: selector.unregister() exception for',
+            #       f'{self.addr}: {repr(e)}')
+            pass
 
         try:
             self.sock.close()
         except OSError as e:
-            print(f'error: socket.close() exception for',
-                  f'{self.addr}: {repr(e)}')
+            pass
+            # print(f'error: socket.close() exception for',
+            #       f'{self.addr}: {repr(e)}')
         finally:
             # Delete reference to socket object for garbage collection
             self.sock = None
 
     def process_request(self):
         self.request = self._recv_buffer
-        print("request = %s" % self.request)
+        # print("request = %s" % self.request)
         self._set_selector_events_mask('w')
 
     def create_response(self):
-        response = self._create_response(self.request)
-        message = response
+        message = self._create_response(self.request)
         self.response_created = True
         self._send_buffer += message
 
@@ -141,7 +142,7 @@ class HTTPRequestProcessor:
     def create_response_not_200(self, responsecode):
         self._flush_headers()
         send_mesg = self._format_response_head(responsecode)
-        print("Sended message %s" % send_mesg)
+        # print("Sended message %s" % send_mesg)
         with open(f"error_templates/{responsecode}.html", 'rb') as error_file:
             body = error_file.read()
         self.headers['Content-Length'] = self.get_file_size(f"error_templates/{responsecode}.html")
@@ -182,7 +183,7 @@ class HTTPRequestProcessor:
             response = self.create_response_200(method=method, uri=uri)
             return response
         except Exception as e:
-            print(repr(e))
+            # print(repr(e))
             return self.create_response_not_200("500")
 
     def _format_response_head(self, responsecode):

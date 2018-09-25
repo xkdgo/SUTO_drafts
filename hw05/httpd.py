@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-import sys
 import socket
 import selectors
 import traceback
 import lib_for_http_server as lib_helper
 import os
 import argparse
+import threading
 
 
 class MultiprocessSocketServer:
@@ -14,25 +14,20 @@ class MultiprocessSocketServer:
     def __init__(self, host="", port=80, workers=1, rootdir=os.path.abspath("./doc_root")):
         self.host = host
         self.port = port
-        self.sel = selectors.DefaultSelector()
+        # self.sel = selectors.DefaultSelector()
         self.workers = workers
         self.rootdir = rootdir
 
-    def serve_forever(self):
-        lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Avoid bind() exception: OSError: [Errno 48] Address already in use
-        lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        lsock.bind((self.host, self.port))
-        lsock.listen()
-        print('listening on', (self.host, self.port))
-        lsock.setblocking(False)
-        self.sel.register(lsock, selectors.EVENT_READ, data=None)
+    def worker(self, lsock):
+        sel = selectors.DefaultSelector()
+        sel.register(lsock, selectors.EVENT_READ, data=None)
+
         try:
             while True:
-                events = self.sel.select(timeout=None)
+                events = sel.select(timeout=None)
                 for key, mask in events:
                     if key.data is None:
-                        self.accept_wrapper(key.fileobj)
+                        self.accept_wrapper(key.fileobj, sel)
                     else:
                         message = key.data
                         try:
@@ -44,18 +39,32 @@ class MultiprocessSocketServer:
         except KeyboardInterrupt:
             print('caught keyboard interrupt, exiting')
         finally:
-            self.terminate()
+            sel.close()
 
-    def accept_wrapper(self, sock):
-
-        conn, addr = sock.accept()  # Should be ready to read
+    def accept_wrapper(self, sock, sel):
+        # sel = self.sel
+        rootdir = self.rootdir
+        try:
+            conn, addr = sock.accept()  # Should be ready to read
+        except BlockingIOError:
+            return
         print('accepted connection from', addr)
         conn.setblocking(False)
-        message = lib_helper.Message(self.sel, conn, addr, self.rootdir)
-        self.sel.register(conn, selectors.EVENT_READ, data=message)
+        message = lib_helper.Message(sel, conn, addr, rootdir)
+        sel.register(conn, selectors.EVENT_READ, data=message)
 
-    def terminate(self):
-        self.sel.close()
+    def serve_forever(self):
+        lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Avoid bind() exception: OSError: [Errno 48] Address already in use
+        lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lsock.bind((self.host, self.port))
+        lsock.listen()
+        print('listening on', (self.host, self.port))
+        lsock.setblocking(False)
+        for _ in range(self.workers):
+            t = threading.Thread(target=self.worker, args=(lsock,))
+            t.start()
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OTUServer')
@@ -87,4 +96,3 @@ if __name__ == "__main__":
                      rootdir=args.root)
     server = MultiprocessSocketServer(**init_args)
     server.serve_forever()
-
