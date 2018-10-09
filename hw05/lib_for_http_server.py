@@ -3,6 +3,7 @@ import selectors
 import datetime
 import mimetypes
 import re
+import logging
 
 
 class Message:
@@ -17,7 +18,6 @@ class Message:
         self.request = None
         self.response_created = False
         self.request_processor = HTTPRequestProcessor(rootdir)
-
 
     def _set_selector_events_mask(self, mode):
         """Set selector to listen for events: mode is 'r', 'w', or 'rw'."""
@@ -77,27 +77,25 @@ class Message:
         self._write()
 
     def close(self):
-        # print('closing connection to', self.addr)
+        logging.debug(f'closing connection to {self.addr}')
         try:
             self.selector.unregister(self.sock)
         except Exception as e:
-            # print(f'error: selector.unregister() exception for',
-            #       f'{self.addr}: {repr(e)}')
+            logging.debug(f'error: selector.unregister() exception for {self.addr}: {repr(e)}')
             pass
 
         try:
             self.sock.close()
         except OSError as e:
+            logging.debug(f'error: socket.close() exception for {self.addr}: {repr(e)}')
             pass
-            # print(f'error: socket.close() exception for',
-            #       f'{self.addr}: {repr(e)}')
         finally:
             # Delete reference to socket object for garbage collection
             self.sock = None
 
     def process_request(self):
         self.request = self._recv_buffer
-        # print("request = %s" % self.request)
+        logging.debug("request = %s" % self.request)
         self._set_selector_events_mask('w')
 
     def create_response(self):
@@ -115,7 +113,7 @@ class HTTPRequestProcessor:
         self.responsecode = {"200": "OK",
                              "500": "Internal sever Error",
                              "405": "Method Unsupported",
-                             "403": "Access Denied",
+                             "403": "Forbidden",
                              "404": "Resource Not Fund",
                              }
         self.rootdir = rootdir
@@ -142,13 +140,14 @@ class HTTPRequestProcessor:
     def create_response_not_200(self, responsecode):
         self._flush_headers()
         send_mesg = self._format_response_head(responsecode)
-        # print("Sended message %s" % send_mesg)
+
         with open(f"error_templates/{responsecode}.html", 'rb') as error_file:
             body = error_file.read()
         self.headers['Content-Length'] = self.get_file_size(f"error_templates/{responsecode}.html")
         self.headers['Content‐Type'] = mimetypes.guess_type(f"error_templates/{responsecode}.html")[0]
         self.headers['Connection'] = "close"
         response = send_mesg.encode("utf-8") + body
+        logging.debug(f"Sended message {response}")
         return response
 
     def create_response_200(self, method, uri="error_templates/404.html"):
@@ -162,6 +161,7 @@ class HTTPRequestProcessor:
                 body = error_file.read()
         send_mesg = self._format_response_head("200")
         response = send_mesg.encode("utf-8") + body
+        logging.debug(f"Sended message {response}")
         return response
 
     def validate_uri(self, method, uri):

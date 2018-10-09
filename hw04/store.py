@@ -6,10 +6,12 @@ class Store(object):
     def __init__(self, hostname="127.0.0.1",
                  port="11211",
                  retry=5,
-                 timeout=1):
+                 timeout=1,
+                 backoff_factor=0.03):
         self.hostname = "%s:%s" % (hostname, port)
         self.timeout = timeout
         self.retry = retry
+        self.backoff = backoff_factor
         self.server = memcache.Client([self.hostname],
                                       dead_retry=self.retry,
                                       socket_timeout=self.timeout
@@ -22,30 +24,30 @@ class Store(object):
                 return
             else:
                 self.close_conn()
-                time.sleep(0.03)
+                time.sleep(self.backoff)
                 continue
         self.server.servers[0].close_socket()
 
     def cache_get(self, key):
         for _ in range(self.retry):
             if not self.is_server_connect:
-                time.sleep(0.03)
+                time.sleep(self.backoff)
                 continue
             ans = self.server.get(key)
             if ans:
                 return ans
             else:
-                time.sleep(0.03)
+                time.sleep(self.backoff)
                 continue
         self.server.servers[0].close_socket()
         return
 
     def get(self, key):
-        for _ in range(self.retry):
+        for number_of_total_retries in range(1, self.retry + 1):
             if self.is_server_connect():
                 return self.server.get(key)
             else:
-                time.sleep(0.03)
+                time.sleep(self.backoff * (2 ^ (number_of_total_retries - 1)))
         raise RuntimeError("Server socket closed %s" % self.hostname)
 
     def close_conn(self):
