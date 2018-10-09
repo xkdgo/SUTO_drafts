@@ -11,6 +11,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import OrderedDict
 import scoring
 from store import Store
+import re
 
 SALT = "Otus"
 ADMIN_LOGIN = "admin"
@@ -36,6 +37,9 @@ GENDERS = {
     MALE: "male",
     FEMALE: "female",
 }
+
+REGEX_EMAIL = re.compile(r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)")
+REGEX_PHONE = re.compile(r"7\d{10}")
 
 
 class ValidationError(Exception):
@@ -144,7 +148,7 @@ class ArgumentsField(Required, Nullable, DictType):
 class EmailField(CharField):
     def _validate(self, instance, value):
         if value:
-            if "@" not in value:
+            if not REGEX_EMAIL.match(value):
                 raise ValidationError("%s invalid email address" % self.name)
 
 
@@ -159,6 +163,9 @@ class PhoneField(Required, Nullable):
                     "Incorrect phone number format, should be 7XXXXXXXXXX")
             if len(str(value)) != 11:
                 raise ValidationError("Phone number must be 11 digits")
+            if not REGEX_PHONE.match(str(value)):
+                raise ValidationError(
+                    "Incorrect phone number format, should be 7XXXXXXXXXX")
 
 
 class DateField(Required, Nullable):
