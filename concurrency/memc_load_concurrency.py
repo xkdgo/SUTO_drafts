@@ -29,32 +29,59 @@ AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "
 
 class Counter(object):
     def __init__(self):
-        self.processed = 0
-        self.errors = 0
+        self.processed = multiprocessing.Value('i', 0)
+        self.errors = multiprocessing.Value('i', 0)
 
 
-class LineProcessor(threading.Thread):
+class LineProcessor(multiprocessing.Process):
     def __init__(self, line_in_queue,
                  counter_instance,
                  device_memc,
                  memc_queues,
                  errors_lock,
-                 processed_lock):
-        threading.Thread.__init__(self)
+                 processed_lock,
+                 options):
+        multiprocessing.Process.__init__(self)
         self.in_queue = line_in_queue
         self.counter = counter_instance
         self.errors_lock = errors_lock
         self.processed_lock = processed_lock
         self.device_memc = device_memc
         self.memc_queues = memc_queues
+        self.t_errors_lock = threading.RLock()
+        self.t_processed_lock = threading.RLock()
+        self.options = options
 
     def run(self):
-        while True:
-            # Get from queue job
-            line = self.in_queue.get()
-            self.process_line(line)
-            # signals to queue job is done
-            self.in_queue.task_done()
+        try:
+            writers = []
+            for memc_addr, memc_queue in self.memc_queues.items():
+                writer = threading.Thread(
+                    name='memc-writer-{}'.format(memc_addr),
+                    target=self.insert_appsinstalled,
+                    args=(memc_addr, memc_queue, self.t_errors_lock, self.t_processed_lock, self.counter, self.options.dry)
+                )
+                writer.setDaemon(True)
+                writer.start()
+                writers.append(writer)
+            while True:
+                # Get from queue job
+                line = self.in_queue.get()
+                if line is None:
+                    # Poison pill means shutdown
+                    logging.info("Exiting: process %s" % self.name)
+                    self.in_queue.task_done()
+                    break
+                self.process_line(line)
+                # signals to queue job is done
+                self.in_queue.task_done()
+        finally:
+            for key, value in self.memc_queues.items():
+                value.put(None)
+            for key, value in self.memc_queues.items():
+                value.join()
+
+
 
     def process_line(self, line):
         line = line.decode("utf-8")
@@ -64,21 +91,14 @@ class LineProcessor(threading.Thread):
         appsinstalled = self.parse_appsinstalled(line)
         if not appsinstalled:
             with self.errors_lock:
-                self.counter.errors += 1
+                self.counter.errors.value += 1
         memc_addr = self.device_memc.get(appsinstalled.dev_type)
         if not memc_addr:
             with self.errors_lock:
-                self.counter.errors += 1
-                logging.error("Unknow device type: %s" % appsinstalled.dev_type)
+                self.counter.errors.value += 1
+            logging.error("Unknown device type: %s" % appsinstalled.dev_type)
             return
         self.memc_queues[memc_addr].put(appsinstalled)
-
-
-        # ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
-        # if ok:
-        #     self.counter_instance.processed += 1
-        # else:
-        #     self.counter_instance.errors += 1
 
     def parse_appsinstalled(self, line):
         line_parts = line.strip().split("\t")
@@ -98,6 +118,39 @@ class LineProcessor(threading.Thread):
             logging.info("Invalid geo coords: `%s`" % line)
         return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
+    def insert_appsinstalled(self, memc_addr, memc_queue, errors_lock, processed_lock, counter, dry_run=False):
+        memc = memcache.Client([memc_addr], socket_timeout=1)
+        while True:
+            appsinstalled = memc_queue.get()
+            if appsinstalled is None:
+                memc_queue.task_done()
+                break
+            ua = appsinstalled_pb2.UserApps()
+            ua.lat = appsinstalled.lat
+            ua.lon = appsinstalled.lon
+            key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+            ua.apps.extend(appsinstalled.apps)
+            packed = ua.SerializeToString()
+            # @TODO retry and timeouts!
+            try:
+
+                if dry_run:
+                    logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+                else:
+                    # print("!!!")
+                    memc.set(key, packed)
+            except Exception as e:
+                logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
+                with errors_lock:
+                    counter.errors.value += 1
+                memc_queue.task_done()
+                continue
+                # return False
+            with processed_lock:
+                counter.processed.value += 1
+            memc_queue.task_done()
+            # return True
+
 
 def dot_rename(path):
     head, fn = os.path.split(path)
@@ -105,117 +158,67 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled_old(memc_addr, appsinstalled, dry_run=False):
-    ua = appsinstalled_pb2.UserApps()
-    ua.lat = appsinstalled.lat
-    ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-    ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
-    try:
-        if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
-        else:
-            memc = memcache.Client([memc_addr])
-            memc.set(key, packed)
-    except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-        return False
-    return True
-
-
-def insert_appsinstalled(memc_addr, memc_queue, errors_lock, processed_lock, counter, pool, dry_run=False):
-    memc = memcache.Client([memc_addr], socket_timeout=1)
-    while True:
-        appsinstalled = memc_queue.get()
-        ua = appsinstalled_pb2.UserApps()
-        ua.lat = appsinstalled.lat
-        ua.lon = appsinstalled.lon
-        key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-        ua.apps.extend(appsinstalled.apps)
-        packed = pool.apply(ua.SerializeToString, ())
-        # @TODO persistent connection
-        # @TODO retry and timeouts!
-        try:
-            if dry_run:
-                logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
-            else:
-                memc.set(key, packed)
-        except Exception as e:
-            logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-            with errors_lock:
-                counter.errors += 1
-                memc_queue.task_done()
-                continue
-                # return False
-        with processed_lock:
-            counter.processed += 1
-        memc_queue.task_done()
-        # return True
-
-
 def main(options):
-    start_time = datetime.datetime.now()
+
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    for fn in glob.iglob(options.pattern):
-        line_process_in_queue = queue.Queue(maxsize=100000)
-        errors_lock = threading.RLock()
-        processed_lock = threading.RLock()
-        memc_queues = {memc_addr: queue.Queue(maxsize=100000)
-                       for memc_addr in device_memc.values()}
-        counter = Counter()
-        writers = []
-        pool = Pool()
-        #(processes=2, maxtasksperchild=1000)
-        n_thread = 20
-        for _ in range(n_thread):
-            t = LineProcessor(line_process_in_queue,
-                              counter,
-                              device_memc,
-                              memc_queues,
-                              errors_lock,
-                              processed_lock)
-            t.setDaemon(True)
-            # Start thread
-            t.start()
-        for memc_addr, memc_queue in memc_queues.items():
-            writer = threading.Thread(
-                name='memc-writer-{}'.format(memc_addr),
-                target=insert_appsinstalled,
-                args=(memc_addr, memc_queue, errors_lock, processed_lock, counter, pool, options.dry)
-            )
-            writer.setDaemon(True)
-            writer.start()
-            writers.append(writer)
+    line_process_in_queue = multiprocessing.JoinableQueue(maxsize=100000)
+    consumers = []
+    try:
+        for fn in glob.iglob(options.pattern):
+            # line_process_in_queue = multiprocessing.JoinableQueue(maxsize=100000)
+            errors_lock = multiprocessing.RLock()
+            processed_lock = multiprocessing.RLock()
 
-        logging.info('Processing %s' % fn)
-        fd = gzip.open(fn)
-        for line in fd:
-            line_process_in_queue.put(line)
-        line_process_in_queue.join()
-        for q in memc_queues.values():
-            q.join()
+            memc_queues = {memc_addr: multiprocessing.JoinableQueue(maxsize=100000)
+                           for memc_addr in device_memc.values()}
+            counter = Counter()
 
-        if not counter.processed:
+            pool = Pool()
+            #(processes=2, maxtasksperchild=1000)
+            num_consumers = multiprocessing.cpu_count() * 2
+            consumers = [LineProcessor(line_process_in_queue,
+                                  counter,
+                                  device_memc,
+                                  memc_queues,
+                                  errors_lock,
+                                  processed_lock,
+                                  options) for _ in range(num_consumers)]
+            for w in consumers:
+                w.start()
+
+            logging.info('Processing %s' % fn)
+            fd = gzip.open(fn)
+            for line in fd:
+                line_process_in_queue.put(line)
+            line_process_in_queue.join()
+            for q in memc_queues.values():
+                q.join()
+
+            if not counter.processed.value:
+                logging.info("Cant process file %s" % fn)
+                fd.close()
+                dot_rename(fn)
+                continue
+            # count statistics
+            err_rate = float(counter.errors.value) / counter.processed.value
+            if err_rate < NORMAL_ERR_RATE:
+                logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
+            else:
+                logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
             fd.close()
             dot_rename(fn)
-            continue
-        # count statistics
-        err_rate = float(counter.errors) / counter.processed
-        if err_rate < NORMAL_ERR_RATE:
-            logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
-        else:
-            logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
-        fd.close()
-        dot_rename(fn)
-        logging.info('Total runtime: %s' % (datetime.datetime.now() - start_time))
+    finally:
+        line_process_in_queue.put(None)
+        if consumers:
+            for w in consumers:
+                w.join()
+    if not consumers:
+        sys.exit(0)
 
 
 def prototest():
@@ -235,6 +238,7 @@ def prototest():
 
 
 if __name__ == '__main__':
+    start_time = datetime.datetime.now()
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
@@ -257,3 +261,4 @@ if __name__ == '__main__':
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
+    logging.info('Total runtime: %s' % (datetime.datetime.now() - start_time))
