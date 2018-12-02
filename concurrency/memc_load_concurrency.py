@@ -51,19 +51,21 @@ class LineProcessor(multiprocessing.Process):
         self.t_errors_lock = threading.RLock()
         self.t_processed_lock = threading.RLock()
         self.options = options
+        self.workers = 5
 
     def run(self):
         try:
             writers = []
-            for memc_addr, memc_queue in self.memc_queues.items():
-                writer = threading.Thread(
-                    name='memc-writer-{}'.format(memc_addr),
-                    target=self.insert_appsinstalled,
-                    args=(memc_addr, memc_queue, self.t_errors_lock, self.t_processed_lock, self.counter, self.options.dry)
-                )
-                writer.setDaemon(True)
-                writer.start()
-                writers.append(writer)
+            for numw in range(self.workers):
+                for memc_addr, memc_queue in self.memc_queues.items():
+                    writer = threading.Thread(
+                        name=f'memc-writer-{memc_addr}-{numw}',
+                        target=self.insert_appsinstalled,
+                        args=(memc_addr, memc_queue, self.t_errors_lock, self.t_processed_lock, self.counter, self.options.dry)
+                    )
+                    writer.setDaemon(True)
+                    writer.start()
+                    writers.append(writer)
             while True:
                 # Get from queue job
                 line = self.in_queue.get()
@@ -133,11 +135,9 @@ class LineProcessor(multiprocessing.Process):
             packed = ua.SerializeToString()
             # @TODO retry and timeouts!
             try:
-
                 if dry_run:
                     logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
                 else:
-                    # print("!!!")
                     memc.set(key, packed)
             except Exception as e:
                 logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
@@ -145,11 +145,10 @@ class LineProcessor(multiprocessing.Process):
                     counter.errors.value += 1
                 memc_queue.task_done()
                 continue
-                # return False
             with processed_lock:
                 counter.processed.value += 1
             memc_queue.task_done()
-            # return True
+
 
 
 def dot_rename(path):
@@ -166,20 +165,18 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    line_process_in_queue = multiprocessing.JoinableQueue(maxsize=100000)
+    line_process_in_queue = multiprocessing.JoinableQueue(maxsize=50000)
+    common_counter = 0
     consumers = []
+    start_time = datetime.datetime.now()
     try:
         for fn in glob.iglob(options.pattern):
-            # line_process_in_queue = multiprocessing.JoinableQueue(maxsize=100000)
             errors_lock = multiprocessing.RLock()
             processed_lock = multiprocessing.RLock()
 
-            memc_queues = {memc_addr: multiprocessing.JoinableQueue(maxsize=100000)
+            memc_queues = {memc_addr: multiprocessing.JoinableQueue(maxsize=50000)
                            for memc_addr in device_memc.values()}
             counter = Counter()
-
-            pool = Pool()
-            #(processes=2, maxtasksperchild=1000)
             num_consumers = multiprocessing.cpu_count() * 2
             consumers = [LineProcessor(line_process_in_queue,
                                   counter,
@@ -206,6 +203,7 @@ def main(options):
                 continue
             # count statistics
             err_rate = float(counter.errors.value) / counter.processed.value
+            common_counter += counter.processed.value
             if err_rate < NORMAL_ERR_RATE:
                 logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
             else:
@@ -213,7 +211,11 @@ def main(options):
             fd.close()
             dot_rename(fn)
     finally:
-        line_process_in_queue.put(None)
+        logging.info('Total runtime: %s' % (datetime.datetime.now() - start_time))
+        logging.info("Total lines processed %s" % common_counter)
+        if line_process_in_queue:
+            line_process_in_queue.put(None)
+            line_process_in_queue.join()
         if consumers:
             for w in consumers:
                 w.join()
@@ -238,7 +240,6 @@ def prototest():
 
 
 if __name__ == '__main__':
-    start_time = datetime.datetime.now()
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
@@ -261,4 +262,4 @@ if __name__ == '__main__':
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
-    logging.info('Total runtime: %s' % (datetime.datetime.now() - start_time))
+
