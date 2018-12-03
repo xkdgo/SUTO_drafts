@@ -52,6 +52,7 @@ class LineProcessor(multiprocessing.Process):
         self.t_processed_lock = threading.RLock()
         self.options = options
         self.workers = 5
+        self.daemon = True
 
     def run(self):
         try:
@@ -203,7 +204,7 @@ def main(options):
                 continue
             # count statistics
             err_rate = float(counter.errors.value) / counter.processed.value
-            common_counter += counter.processed.value
+            common_counter += int(counter.processed.value)
             if err_rate < NORMAL_ERR_RATE:
                 logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
             else:
@@ -213,12 +214,13 @@ def main(options):
     finally:
         logging.info('Total runtime: %s' % (datetime.datetime.now() - start_time))
         logging.info("Total lines processed %s" % common_counter)
-        if line_process_in_queue:
-            line_process_in_queue.put(None)
-            line_process_in_queue.join()
+        for _ in consumers:
+            if line_process_in_queue:
+                line_process_in_queue.put(None)
+                line_process_in_queue.join()
         if consumers:
             for w in consumers:
-                w.join()
+                w.join(0.05)
     if not consumers:
         sys.exit(0)
 
